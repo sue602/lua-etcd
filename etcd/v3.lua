@@ -1,6 +1,7 @@
 -- https://github.com/ledgetech/lua-resty-http
+local skynet = require "skynet"
 local cjson         = require("cjson.safe")
-local httpc = require "http.httpc"
+local httpc = require "http_c"
 local setmetatable  = setmetatable
 local random        = math.random
 local utils         = require("etcd.utils")
@@ -58,7 +59,7 @@ local function choose_endpoint(self)
 end
 
 
-local function http_request_uri(self, method, uri, body, headers, keepalive)
+local function http_request_uri(self, method, uri, body, headers, keepalive, callback)
     local endpoint, err = choose_endpoint(self)
     if not endpoint then
         return nil, err
@@ -72,9 +73,9 @@ local function http_request_uri(self, method, uri, body, headers, keepalive)
     end
     
     local recvheader = {}
-    Log.d("request ==",method,endpoint.http_host,uri,full_uri)
-    local status, resp = httpc.request(method, endpoint.http_host, full_uri, recvheader, headers, body)
-    Log.d("request ==",status,resp)
+    Log.d("request 1==",method,endpoint.http_host,uri,full_uri)
+    local status, resp = httpc.request(method, endpoint.http_host, full_uri, recvheader, headers, body, callback)
+    Log.d("request 2==",status,resp)
     if status ~= 200 then
         return nil, resp
     end
@@ -516,7 +517,7 @@ local function txn(self, opts_arg, compare, success, failure)
 end
 
 
-local function request_chunk(self, method, path, opts, timeout)
+local function request_chunk(self, method, path, opts, timeout, callback)
     local body, err, _
     if opts and opts.body and tab_nkeys(opts.body) > 0 then
         body, err = encode_json(opts.body)
@@ -549,7 +550,7 @@ local function request_chunk(self, method, path, opts, timeout)
     Log.d("body type ==",type(body))
     Log.dump(headers,"headers ===",10)
     local res
-    res, err = http_request_uri(self, method, path, body, headers, keepalive)
+    res, err = http_request_uri(self, method, path, body, headers, keepalive, callback)
     if not res then
         return nil, err
     end
@@ -577,7 +578,7 @@ local function get_range_end(key)
 end
 
 
-local function watch(self, key, attr)
+local function watch(self, key, attr, callback)
     -- verify key
     if #key == 0 then
         key = str_char(0)
@@ -647,16 +648,8 @@ local function watch(self, key, attr)
         return nil, err
     end
 
-    local callback_fun, http_cli
-    callback_fun, err, http_cli = request_chunk(self, "POST", '/watch',
-                                                opts, attr.timeout or self.timeout)
-    if not callback_fun then
-        return nil, err
-    end
-    if opts.need_cancel == true then
-        return callback_fun, nil, http_cli
-    end
-    return callback_fun
+    skynet.fork(request_chunk,self,"POST", '/watch', opts, attr.timeout or self.timeout,callback)
+    return true
 end
 
 do
@@ -675,7 +668,7 @@ function _M.get(self, key, opts)
     return get(self, key, attr)
 end
 
-function _M.watch(self, key, opts)
+function _M.watch(self, key, callback, opts)
     attr = {}
 
     key = utils.get_real_key(self.key_prefix, key)
@@ -688,8 +681,27 @@ function _M.watch(self, key, opts)
     attr.watch_id = opts and opts.watch_id
     attr.fragment = opts and opts.fragment
     attr.need_cancel = opts and opts.need_cancel
+    -- 内置回调函数
+    local function cb( context )
+        context = decode_json(context)
+        if context and context.result and context.result.events then
+            for _, event in ipairs(context.result.events) do
+                if event.kv.value then   -- DELETE not have value
+                    event.kv.value = decode_base64(event.kv.value or "")
+                    event.kv.value = self.serializer.deserialize(event.kv.value)
+                end
+                event.kv.key = decode_base64(event.kv.key)
+                if event.prev_kv then
+                    event.prev_kv.value = decode_base64(event.prev_kv.value or "")
+                    event.prev_kv.value = self.serializer.deserialize(event.prev_kv.value)
+                    event.prev_kv.key = decode_base64(event.prev_kv.key)
+                end
+            end
+        end
+        callback(context)
+    end
 
-    return watch(self, key, attr)
+    return watch(self, key, attr, cb)
 end
 
 function _M.watchcancel(self, http_cli)
