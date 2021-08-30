@@ -1,7 +1,7 @@
 -- https://github.com/ledgetech/lua-resty-http
 local skynet = require "skynet"
 local cjson         = require("cjson.safe")
-local httpc = require "http_c"
+local httpc = require "http.httpc"
 local setmetatable  = setmetatable
 local random        = math.random
 local utils         = require("etcd.utils")
@@ -74,7 +74,17 @@ local function http_request_uri(self, method, uri, body, headers, keepalive, cal
     
     local recvheader = {}
     Log.d("request 1==",method,endpoint.http_host,uri,full_uri)
-    local status, resp = httpc.request(method, endpoint.http_host, full_uri, recvheader, headers, body, callback)
+    local status, resp
+    if callback then
+        for resp, stream in httpc.request_stream(method, endpoint.http_host, full_uri, headers, body) do
+            for k,v in pairs(stream.header) do
+                print("HEADER",k,v)
+            end
+            callback(stream.status,resp)
+        end
+    else
+        status, resp = httpc.request(method, endpoint.http_host, full_uri, recvheader, headers, body)
+    end
     Log.d("request 2==",status,resp)
     if status ~= 200 then
         return nil, resp
@@ -346,7 +356,7 @@ local function set(self, key, val, attr)
             ignore_lease = ignore_lease,
         }
     }
-
+    print("key ==",key,val)
     local res
     res, err = _request_uri(self, "POST", "/kv/put", opts, self.timeout)
     if err then
@@ -549,17 +559,7 @@ local function request_chunk(self, method, path, opts, timeout, callback)
     end
     Log.d("body type ==",type(body))
     Log.dump(headers,"headers ===",10)
-    local res
-    res, err = http_request_uri(self, method, path, body, headers, keepalive, callback)
-    if not res then
-        return nil, err
-    end
-
-    if res.status >= 300 then
-        return nil, "failed to watch data, response code: " .. res.status
-    end
-    Log.dump(res,"watch =====",10)
-    return res
+    http_request_uri(self, method, path, body, headers, keepalive, callback)
 end
 
 
@@ -682,7 +682,7 @@ function _M.watch(self, key, callback, opts)
     attr.fragment = opts and opts.fragment
     attr.need_cancel = opts and opts.need_cancel
     -- 内置回调函数
-    local function cb( context )
+    local function cb(status, context )
         context = decode_json(context)
         if context and context.result and context.result.events then
             for _, event in ipairs(context.result.events) do
@@ -698,7 +698,7 @@ function _M.watch(self, key, callback, opts)
                 end
             end
         end
-        callback(context)
+        callback(status,context)
     end
 
     return watch(self, key, attr, cb)
@@ -728,7 +728,7 @@ function _M.readdir(self, key, opts)
     return get(self, key, attr)
 end
 
-function _M.watchdir(self, key, opts)
+function _M.watchdir(self, key, callback, opts)
     attr = {}
 
     key = utils.get_real_key(self.key_prefix, key)
@@ -743,7 +743,27 @@ function _M.watchdir(self, key, opts)
     attr.fragment = opts and opts.fragment
     attr.need_cancel = opts and opts.need_cancel
 
-    return watch(self, key, attr)
+    -- 内置回调函数
+    local function cb(status, context )
+        context = decode_json(context)
+        if context and context.result and context.result.events then
+            for _, event in ipairs(context.result.events) do
+                if event.kv.value then   -- DELETE not have value
+                    event.kv.value = decode_base64(event.kv.value or "")
+                    event.kv.value = self.serializer.deserialize(event.kv.value)
+                end
+                event.kv.key = decode_base64(event.kv.key)
+                if event.prev_kv then
+                    event.prev_kv.value = decode_base64(event.prev_kv.value or "")
+                    event.prev_kv.value = self.serializer.deserialize(event.prev_kv.value)
+                    event.prev_kv.key = decode_base64(event.prev_kv.key)
+                end
+            end
+        end
+        callback(status,context)
+    end
+
+    return watch(self, key, attr, cb)
 end
 
 end -- do
