@@ -60,6 +60,7 @@ end
 
 
 local function http_request_uri(self, method, uri, body, headers, keepalive, callback)
+    Log.d("http_request_uri=",method, uri, body, headers, keepalive)
     local endpoint, err = choose_endpoint(self)
     if not endpoint then
         return nil, err
@@ -71,12 +72,12 @@ local function http_request_uri(self, method, uri, body, headers, keepalive, cal
     else
         full_uri = endpoint.api_prefix .. uri
     end
-    
+
     local recvheader = {}
     Log.d("request 1==",method,endpoint.http_host,uri,full_uri)
     local status, resp
     if callback then
-        for resp, stream in httpc.request_stream(method, endpoint.http_host, full_uri, headers, body) do
+        for resp, stream in httpc.request_stream(method, endpoint.http_host, full_uri, recvheader, headers, body) do
             for k,v in pairs(stream.header) do
                 print("HEADER",k,v)
             end
@@ -975,16 +976,8 @@ function _M.version(self)
 end
 
 -- /stats
-function _M.stats_leader(self)
-    return _request_uri(self, "GET", "/v2/stats/leader", nil, self.timeout)
-end
-
 function _M.stats_self(self)
-    return _request_uri(self, "GET", "/v2/stats/self", nil, self.timeout)
-end
-
-function _M.stats_store(self)
-    return _request_uri(self, "GET", "/v2/stats/store", nil, self.timeout)
+    return _request_uri(self, "POST", "/maintenance/status", nil, self.timeout)
 end
 
 
@@ -1011,6 +1004,40 @@ function _M.rmdir(self, key, opts)
     attr.prev_kv   = opts and opts.prev_kv
 
     return delete(self, key, attr)
+end
+
+-- dir
+function _M.mkdir(self, key, ttl)
+    attr = {}
+    attr.ttl = ttl
+    attr.dir = true
+
+    key = utils.get_real_key(self.key_prefix, key)
+
+    return set(self, key, nil, attr)
+end
+
+-- mkdir if not exists
+function _M.mkdirnx(self, key, ttl)
+    attr = {}
+    attr.ttl = ttl
+    attr.dir = true
+    attr.prev_exist = false
+
+    key = utils.get_real_key(self.key_prefix, key)
+
+    return set(self, key, nil, attr)
+end
+
+-- in-order keys
+function _M.push(self, key, val, ttl)
+    attr = {}
+    attr.ttl = ttl
+    attr.in_order = true
+
+    key = utils.get_real_key(self.key_prefix, key)
+
+    return set(self, key, val, attr)
 end
 
 end -- do
